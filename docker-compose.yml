@@ -1,0 +1,43 @@
+# SageVatar in Docker (local / LAN).
+#   docker compose up -d --build      → http://localhost:8080, https://<this-PC's-LAN-IP>:8443 (camera works on HTTPS)
+#   docker compose logs -f api        → server log (dev-outbox email links are printed here)
+#   docker compose down               → stop (data in ./docker-data is kept)
+#
+# Data lives in ./docker-data (SQLite database + uploaded photos/avatars) so it survives rebuilds.
+# Settings come from server/.env, with the container-specific values below taking precedence.
+services:
+  api:
+    build:
+      context: .
+      target: api
+    image: sagevatar-api:latest
+    env_file: server/.env
+    environment:
+      # Same mail behaviour as local dev: without SMTP, emails are saved to the outbox and their
+      # links logged. For a real production deployment use NODE_ENV=production + SMTP + HTTPS.
+      NODE_ENV: development
+      PORT: '4000'
+      DATABASE_URL: file:/data/sagevatar.db
+      STORAGE_DIR: /data/storage
+      # Links in emails (invites, verification, reset) — set to the address people open.
+      CLIENT_ORIGIN: ${SAGEVATAR_URL:-http://localhost:8080}
+      COOKIE_SECURE: 'false'
+    volumes:
+      - ./docker-data:/data
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      target: web
+    image: sagevatar-web:latest
+    depends_on:
+      - api
+    ports:
+      - '8080:80'
+      # HTTPS (needed for the live camera on other devices). Certificate: ./docker/certs —
+      # create it with docker/make-cert.sh (self-signed for this PC's LAN addresses).
+      - '8443:443'
+    volumes:
+      - ./docker/certs:/etc/nginx/certs:ro
+    restart: unless-stopped

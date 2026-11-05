@@ -1,0 +1,8 @@
+node_modules
+dist
+coverage
+package-lock.json
+server/storage
+server/storage-test
+server/prisma/migrations
+client/public/vendor

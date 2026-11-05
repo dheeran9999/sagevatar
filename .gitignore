@@ -1,0 +1,51 @@
+node_modules/
+dist/
+coverage/
+*.log
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Local database
+server/prisma/*.db
+server/prisma/*.db-journal
+
+# Uploaded and generated media (seed regenerates avatars)
+server/storage/*
+!server/storage/.gitkeep
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Test database storage
+server/storage-test/
+
+# Copied from node_modules by client/scripts/copy-vendor.mjs
+client/public/vendor/
+
+.vitest/
+!client/.env.example
+
+# Docker runtime data (database + uploads)
+docker-data/
+
+# Self-signed TLS for LAN HTTPS (generated locally, never committed)
+docker/certs/
+
+# Prisma shadow / scratch databases anywhere
+*.db
+*.db-journal
+
+# Private keys and certificates
+*.pem
+*.key
+*.crt
+
+# Personal AI-assistant / tool settings
+.claude/

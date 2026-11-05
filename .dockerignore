@@ -1,0 +1,21 @@
+**/node_modules
+**/dist
+**/coverage
+**/*.log
+.git
+.claude
+.vscode
+.idea
+docker-data
+# Secrets and local data never go into an image (server/.env is passed at run time).
+**/.env
+**/.env.*
+!**/.env.example
+server/prisma/*.db
+server/prisma/*.db-journal
+server/storage
+server/storage-test
+client/public/vendor
+client/public/qa-tmp
+.vitest
+docker/certs

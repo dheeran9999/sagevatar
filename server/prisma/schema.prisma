@@ -1,0 +1,628 @@
+// SageAvatar Studio data model.
+// Dev: SQLite. Prod: switch provider to "postgresql" and set DATABASE_URL.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// Only two roles can ever exist. There is no Manager / Approver / Admin.
+enum RoleCode {
+  CREATOR
+  EMPLOYEE
+}
+
+enum AvatarTypeCode {
+  FACE
+  HALF_BODY
+  FULL_BODY
+  BACKGROUND
+}
+
+enum EmailStatus {
+  QUEUED
+  SENT
+  FAILED
+}
+
+/// Where a library asset came from — recorded for every avatar.
+enum AssetSource {
+  ORIGINAL // generated/drawn for SageAvatar Studio
+  IN_HOUSE // created by SageIT staff
+  LICENSED // bought or licensed from a third party
+  PUBLIC_DOMAIN // CC0 / public domain
+  AI_GENERATED // made with the configured AI image service, published by a Creator
+}
+
+enum AvatarStyle {
+  PROFESSIONAL
+  CASUAL
+  THEMED
+}
+
+enum PhotoSource {
+  CAMERA
+  UPLOAD
+}
+
+// ---------------------------------------------------------------- Identity
+
+/// Lookup table for the two roles. The primary key is the enum, so a third
+/// role cannot be inserted.
+model Role {
+  code        RoleCode @id
+  name        String
+  description String
+  users       User[]
+}
+
+model User {
+  id               String    @id @default(cuid())
+  email            String    @unique
+  name             String
+  /// bcrypt hash. Null until an invited user accepts the invitation.
+  passwordHash     String?
+  roleCode         RoleCode  @default(EMPLOYEE)
+  role             Role      @relation(fields: [roleCode], references: [code])
+  isActive         Boolean   @default(true)
+  /// Incremented on deactivation / password change to revoke every issued session.
+  tokenVersion     Int       @default(0)
+  failedLoginCount Int       @default(0)
+  lockedUntil      DateTime?
+  /// SHA-256 of the one-time invite token (the raw token is never stored).
+  inviteTokenHash  String?   @unique
+  inviteExpiresAt  DateTime?
+  invitedById      String?
+  invitedBy        User?     @relation("UserInvites", fields: [invitedById], references: [id], onDelete: SetNull)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  lastLoginAt      DateTime?
+  /// Set when the user proves they own the address (verification link, invite or reset link).
+  emailVerifiedAt  DateTime?
+  /// SHA-256 of the one-time email-verification token.
+  verifyTokenHash  String?   @unique
+  verifyExpiresAt  DateTime?
+  /// SHA-256 of the one-time password-reset token.
+  resetTokenHash   String?   @unique
+  resetExpiresAt   DateTime?
+  /// Appearance settings JSON (validated by lib/preferences.ts). Null = defaults.
+  preferences      String?
+  /// Company employee ID (e.g. SIT-1042). Set by a Creator; searchable in group designs.
+  employeeCode     String?   @unique
+  /// HR details. Department and designation are set by a Creator; phone by the person.
+  department       String?
+  designation      String?
+  phone            String?
+  /// Company-email change waiting for verification (the current email stays active until then).
+  pendingEmail         String?
+  /// SHA-256 of the one-time email-change token.
+  emailChangeTokenHash String?   @unique
+  emailChangeExpiresAt DateTime?
+
+  invitees               User[]              @relation("UserInvites")
+  avatarsCreated         Avatar[]            @relation("AvatarCreator")
+  avatarsCleared         Avatar[]            @relation("AvatarRightsConfirmer")
+  templatesCreated       CorporateTemplate[]
+  aiJobs                 AiGenerationJob[]
+  eventsCreated          Event[]             @relation("EventCreator")
+  eventAssignments       EventAssignment[]   @relation("EventAssignee")
+  assignmentsMade        EventAssignment[]   @relation("EventAssigner")
+  eventPhotos            EventPhoto[]
+  notifications          Notification[]
+  generatedAvatars       GeneratedAvatar[]
+  creations              PhotoCreation[]
+  emailActivities        EmailActivity[]
+  auditLogs              AuditLog[]
+  employeePhotos         EmployeePhoto[]     @relation("PhotoSubject")
+  photosUploaded         EmployeePhoto[]     @relation("PhotoUploader")
+  groupPosters           GroupPoster[]
+  posterTemplatesUpdated PosterTemplate[]
+  brandingUpdated        PosterBranding[]
+
+  @@index([roleCode, isActive])
+}
+
+// ---------------------------------------------------------------- Library
+
+/// The four fixed avatar types. Creators can relabel them, set their default
+/// placement and switch them on or off, but cannot add new ones.
+model AvatarType {
+  code             AvatarTypeCode @id
+  name             String
+  description      String         @default("")
+  /// { layer, x, y, scale } — see src/lib/domain.ts
+  defaultPlacement Json
+  sortOrder        Int            @default(0)
+  isActive         Boolean        @default(true)
+  updatedAt        DateTime       @updatedAt
+  avatars          Avatar[]
+}
+
+model AvatarCategory {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  slug        String   @unique
+  description String   @default("")
+  sortOrder   Int      @default(0)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  avatars Avatar[]
+}
+
+model Avatar {
+  id               String         @id @default(cuid())
+  name             String
+  description      String         @default("")
+  /// Comma-separated, lower-case search tags (e.g. "smile,wave,suit").
+  tags             String         @default("")
+  style            AvatarStyle    @default(CASUAL)
+  typeCode         AvatarTypeCode
+  type             AvatarType     @relation(fields: [typeCode], references: [code])
+  /// Paths relative to the private storage root. Served only via /api/assets after an auth check.
+  fileKey          String         @unique
+  thumbKey         String?
+  mimeType         String
+  sizeBytes        Int?
+  isAnimated       Boolean        @default(false)
+  width            Int
+  height           Int
+  /// { layer, x, y, scale } — see src/lib/domain.ts
+  defaultPlacement Json
+  isActive         Boolean        @default(false)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  // ---- Source & licensing (required for every upload) ----
+  sourceType          AssetSource @default(ORIGINAL)
+  /// Author, studio or vendor.
+  sourceName          String      @default("")
+  sourceUrl           String?
+  licenseName         String      @default("")
+  licenseUrl          String?
+  licenseNotes        String      @default("")
+  /// Credit line to show if the licence requires attribution.
+  attribution         String      @default("")
+  licenseExpiresAt    DateTime?
+  rightsConfirmedAt   DateTime?
+  rightsConfirmedById String?
+  rightsConfirmedBy   User?       @relation("AvatarRightsConfirmer", fields: [rightsConfirmedById], references: [id], onDelete: SetNull)
+
+  categoryId  String
+  category    AvatarCategory @relation(fields: [categoryId], references: [id])
+  createdById String
+  createdBy   User           @relation("AvatarCreator", fields: [createdById], references: [id])
+
+  creations     PhotoCreation[]
+  generatedFrom GeneratedAvatar[]
+  eventPhotos   EventPhoto[]
+
+  /// Cached text embedding (JSON number[]) for semantic search; refreshed when the text changes.
+  embedding      String?
+  embeddingModel String?
+  embeddingHash  String?
+
+  @@index([categoryId, typeCode, isActive])
+}
+
+/// Branded frame / overlay that can be applied to a photo.
+model CorporateTemplate {
+  id          String   @id @default(cuid())
+  name        String
+  description String   @default("")
+  /// Paths relative to the private storage root.
+  fileKey     String   @unique
+  thumbKey    String?
+  mimeType    String
+  sizeBytes   Int?
+  width       Int
+  height      Int
+  /// Template-specific settings, e.g. { photoArea: {x,y,w,h}, captionSlots: [] }
+  layout      Json
+  isActive    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  createdById String
+  createdBy   User   @relation(fields: [createdById], references: [id])
+
+  creations PhotoCreation[]
+
+  @@index([isActive])
+}
+
+// ---------------------------------------------------------------- Creations
+
+/// A finished photo. Files live in private storage and are only served to the owner.
+model PhotoCreation {
+  id         String   @id @default(cuid())
+  title      String   @default("Untitled")
+  /// Paths relative to the private storage root — never exposed as public URLs.
+  sourcePath String
+  resultPath String
+  /// Every layer's position, scale, rotation, flip, opacity and z-order.
+  layout     Json
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  userId            String
+  user              User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  avatarId          String?
+  avatar            Avatar?            @relation(fields: [avatarId], references: [id], onDelete: SetNull)
+  /// The user's own AI-generated avatar, when one was used instead of a library avatar.
+  generatedAvatarId String?
+  generatedAvatar   GeneratedAvatar?   @relation(fields: [generatedAvatarId], references: [id], onDelete: SetNull)
+  templateId        String?
+  template          CorporateTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  metadata        PhotoMetadata?
+  emailActivities EmailActivity[]
+
+  @@index([userId, createdAt])
+}
+
+model PhotoMetadata {
+  id        String      @id @default(cuid())
+  source    PhotoSource
+  width     Int
+  height    Int
+  mimeType  String
+  sizeBytes Int
+  sha256    String
+  userAgent String?
+  createdAt DateTime    @default(now())
+
+  creationId String        @unique
+  creation   PhotoCreation @relation(fields: [creationId], references: [id], onDelete: Cascade)
+}
+
+model EmailActivity {
+  id                String      @id @default(cuid())
+  recipient         String
+  subject           String
+  status            EmailStatus @default(QUEUED)
+  providerMessageId String?
+  error             String?
+  createdAt         DateTime    @default(now())
+  sentAt            DateTime?
+
+  /// smtp = accepted by the mail server; dev-outbox = saved locally, NOT delivered.
+  delivery String?
+
+  userId        String
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Exactly one of these is set: a personal creation or an event photo.
+  creationId    String?
+  creation      PhotoCreation? @relation(fields: [creationId], references: [id], onDelete: Cascade)
+  eventPhotoId  String?
+  eventPhoto    EventPhoto?    @relation(fields: [eventPhotoId], references: [id], onDelete: Cascade)
+  groupPosterId String?
+  groupPoster   GroupPoster?   @relation(fields: [groupPosterId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([status, createdAt])
+}
+
+// ---------------------------------------------------------------- Audit
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  /// e.g. AUTH_LOGIN_SUCCESS, EMPLOYEE_INVITED, AVATAR_UPDATED — see src/lib/audit.ts
+  action     String
+  entityType String?
+  entityId   String?
+  details    Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  actorId String?
+  actor   User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+}
+
+/// One "Generate with AI" request. Images are produced in parallel; progress is real.
+model AiGenerationJob {
+  id         String         @id @default(cuid())
+  userId     String
+  user       User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  prompt     String
+  style      String
+  typeCode   AvatarTypeCode
+  count      Int
+  /// RUNNING → SUCCEEDED | PARTIAL | FAILED
+  status     String         @default("RUNNING")
+  completed  Int            @default(0)
+  failed     Int            @default(0)
+  error      String?
+  provider   String
+  model      String
+  createdAt  DateTime       @default(now())
+  finishedAt DateTime?
+
+  images GeneratedAvatar[]
+
+  @@index([userId, createdAt])
+}
+
+/// A real image returned by the AI service. Private to its owner until a Creator publishes it.
+model GeneratedAvatar {
+  id                String          @id @default(cuid())
+  jobId             String
+  job               AiGenerationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  userId            String
+  user              User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Keys relative to private storage (ai/<userId>/...). Never public.
+  fileKey           String          @unique
+  thumbKey          String
+  mimeType          String
+  width             Int
+  height            Int
+  sizeBytes         Int
+  createdAt         DateTime        @default(now())
+  publishedAvatarId String?
+  publishedAvatar   Avatar?         @relation(fields: [publishedAvatarId], references: [id], onDelete: SetNull)
+  eventPhotos       EventPhoto[]
+  creations         PhotoCreation[]
+
+  @@index([userId, createdAt])
+}
+
+enum EventStatus {
+  DRAFT // only Creators see it
+  UPCOMING
+  ACTIVE
+  COMPLETED // gallery stays viewable, no new photos
+  CANCELLED
+  ARCHIVED // hidden from employees
+}
+
+enum GalleryVisibility {
+  PARTICIPANTS // every assigned participant sees every event photo (default)
+  PRIVATE // employees see only their own photos; Creators see all
+}
+
+model Event {
+  id                String            @id @default(cuid())
+  /// Human-friendly unique Event ID, e.g. EVT-261104-7K2Q
+  code              String            @unique
+  name              String
+  description       String            @default("")
+  instructions      String            @default("")
+  location          String
+  /// Local calendar date (YYYY-MM-DD) and times (HH:mm) as entered, plus derived instants.
+  eventDate         String
+  startTime         String
+  endTime           String
+  startsAt          DateTime
+  endsAt            DateTime
+  status            EventStatus       @default(DRAFT)
+  galleryVisibility GalleryVisibility @default(PARTICIPANTS)
+  /// Private storage keys (events/<id>/cover...). Never public.
+  coverKey          String?
+  coverThumbKey     String?
+  createdById       String
+  createdBy         User              @relation("EventCreator", fields: [createdById], references: [id])
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  assignments EventAssignment[]
+  albums      EventAlbum[]
+  photos      EventPhoto[]
+  posters     GroupPoster[]
+
+  @@index([status, startsAt])
+}
+
+model EventAssignment {
+  id           String   @id @default(cuid())
+  eventId      String
+  event        Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User     @relation("EventAssignee", fields: [userId], references: [id], onDelete: Cascade)
+  assignedById String?
+  assignedBy   User?    @relation("EventAssigner", fields: [assignedById], references: [id], onDelete: SetNull)
+  createdAt    DateTime @default(now())
+
+  /// One assignment per person per event (duplicate assignments are impossible).
+  @@unique([eventId, userId])
+  @@index([userId])
+}
+
+model EventAlbum {
+  id          String       @id @default(cuid())
+  eventId     String
+  event       Event        @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  name        String
+  description String       @default("")
+  sortOrder   Int          @default(0)
+  createdAt   DateTime     @default(now())
+  photos      EventPhoto[]
+
+  @@unique([eventId, name])
+}
+
+/// A photograph taken inside an event. Separate from personal PhotoCreation records.
+model EventPhoto {
+  id                String           @id @default(cuid())
+  eventId           String
+  event             Event            @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  userId            String
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  albumId           String?
+  album             EventAlbum?      @relation(fields: [albumId], references: [id], onDelete: SetNull)
+  avatarId          String?
+  avatar            Avatar?          @relation(fields: [avatarId], references: [id], onDelete: SetNull)
+  generatedAvatarId String?
+  generatedAvatar   GeneratedAvatar? @relation(fields: [generatedAvatarId], references: [id], onDelete: SetNull)
+  title             String           @default("Event photo")
+  source            PhotoSource
+  /// Keys relative to private storage (events/<eventId>/photos/...).
+  originalPath      String
+  finalPath         String
+  thumbPath         String
+  layout            Json
+  capturedAt        DateTime
+  createdAt         DateTime         @default(now())
+  emailActivities   EmailActivity[]
+
+  @@index([eventId, createdAt])
+  @@index([userId, createdAt])
+}
+
+/// In-app notification (also emailed when email is configured).
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  title     String
+  body      String    @default("")
+  link      String?
+  eventId   String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+  /// event | photo | ai | poster | account — for filtering in the Notification Center.
+  category  String    @default("event")
+  /// Who caused it (e.g. the Creator who assigned the event, the employee who saved a photo).
+  actorId   String?
+  /// Structured details shown in the popup (JSON object of label → value).
+  data      Json?
+  /// Same key for the same user = the same notification; prevents duplicates.
+  dedupeKey String?
+
+  @@unique([userId, dedupeKey])
+  @@index([userId, readAt, createdAt])
+}
+
+// ---------------------------------------------------------------- Group anniversary posters
+
+/**
+ * An employee's own photograph, authorised for company recognition designs.
+ * Never usable unless permission is recorded: either the employee uploaded it themselves
+ * (SELF) or a Creator confirmed the employee's authorisation when uploading (CREATOR_CONFIRMED).
+ */
+model EmployeePhoto {
+  id                  String   @id @default(cuid())
+  /// The person in the photo.
+  userId              String
+  user                User     @relation("PhotoSubject", fields: [userId], references: [id], onDelete: Cascade)
+  uploadedById        String?
+  uploadedBy          User?    @relation("PhotoUploader", fields: [uploadedById], references: [id], onDelete: SetNull)
+  /// Private storage keys (people/<userId>/...). Never public.
+  fileKey             String   @unique
+  thumbKey            String
+  /// Optional person-segmentation mask (greyscale PNG, same size as the photo).
+  maskKey             String?
+  mimeType            String
+  width               Int
+  height              Int
+  sizeBytes           Int
+  sha256              String
+  /// Normalised face box { x, y, w, h } (0..1 of the photo) — null when no face was found.
+  face                Json?
+  /// auto (detected in the browser) | manual (adjusted by a person) | none
+  faceSource          String   @default("none")
+  isPrimary           Boolean  @default(false)
+  /// SELF | CREATOR_CONFIRMED
+  consentBasis        String
+  consentConfirmedAt  DateTime
+  /// The person allows colleagues to use this photo in their own designs.
+  shareWithColleagues Boolean  @default(false)
+  /// false = withdrawn; withdrawn photos can never be used again.
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@index([userId, isActive])
+}
+
+/**
+ * Creator-managed settings for the built-in group poster designs (layouts live in code).
+ */
+model PosterTemplate {
+  key               String    @id
+  name              String
+  description       String    @default("")
+  heading           String    @default("Happy Work Anniversary!")
+  maxParticipants   Int
+  isPublished       Boolean   @default(true)
+  sortOrder         Int       @default(0)
+  /// illustrated = built-in drawn design; photo = a Creator-uploaded photograph whose faces are replaced
+  kind              String    @default("illustrated")
+  /// Photo templates: private storage key and size of the base photograph.
+  photoKey          String?
+  photoWidth        Int?
+  photoHeight       Int?
+  /// Photo templates: [{ id, label, role, x, y, w, h, angle }] — face boxes normalised to the photo.
+  faceSlots         Json?
+  /// Print the participants' names on a ribbon at the bottom.
+  showNames         Boolean   @default(true)
+  /// When the Creator confirmed the rights to use the photograph (and the people in it).
+  rightsConfirmedAt DateTime?
+  updatedAt         DateTime  @updatedAt
+  updatedById       String?
+  updatedBy         User?     @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+}
+
+/**
+ * Corporate branding used on official posters (single row, id = "default").
+ */
+model PosterBranding {
+  id          String   @id
+  companyName String   @default("SageIT")
+  tagline     String   @default("")
+  /// Approved logo uploaded by a Creator (private storage). Null = text wordmark.
+  logoKey     String?
+  updatedAt   DateTime @updatedAt
+  updatedById String?
+  updatedBy   User?    @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+}
+
+/**
+ * One "Generate with Image" run. Progress is real (stage + percent written as work happens).
+ */
+model GroupPoster {
+  id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  templateKey  String
+  eventId      String?
+  event        Event?    @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  title        String
+  /// RUNNING → SUCCEEDED | FAILED
+  status       String    @default("RUNNING")
+  stage        String    @default("queued")
+  progress     Int       @default(0)
+  error        String?
+  /// ai = AI-generated scene + face compositing; template = built-in scene + face compositing
+  mode         String
+  /// Why the template scene was used instead of AI (e.g. not configured / failed).
+  modeNote     String?
+  variation    Int       @default(0)
+  /// [{ userId, name, photoId, slot, face }]
+  participants Json
+  resultKey    String?
+  thumbKey     String?
+  sceneKey     String?
+  width        Int?
+  height       Int?
+  creationId   String?
+  eventPhotoId String?
+  /// When participants were notified and given view access (official Creator posters).
+  sharedAt     DateTime?
+  createdAt    DateTime  @default(now())
+  finishedAt   DateTime?
+
+  emailActivities EmailActivity[]
+
+  @@index([userId, createdAt])
+}
